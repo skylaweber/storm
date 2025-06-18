@@ -65,6 +65,13 @@ class GenPersona(dspy.Signature):
     personas = dspy.OutputField(format=str)
 
 
+class GenSinglePerspective(dspy.Signature):
+    """For the main topic `[MAIN_TOPIC]`, define the single, most essential theme or aspect that should be the focus of a brief ~500-word article. If the main topic is already sufficiently narrow, use the main topic itself as the focus. Output a concise phrase for this single perspective."""
+
+    main_topic = dspy.InputField(prefix="Main topic:", format=str)
+    single_perspective = dspy.OutputField(format=str)
+
+
 class CreateWriterWithPersona(dspy.Module):
     """Discover different perspectives of researching the topic by reading Wikipedia pages of related topics."""
 
@@ -130,25 +137,40 @@ class StormPersonaGenerator:
 
     def __init__(self, engine: Union[dspy.dsp.LM, dspy.dsp.HFModel]):
         self.create_writer_with_persona = CreateWriterWithPersona(engine=engine)
+        self.gen_single_perspective = dspy.Predict(GenSinglePerspective, n=1)
+        self.engine = engine
 
     def generate_persona(self, topic: str, max_num_persona: int = 3) -> List[str]:
         """
-        Generates a list of personas based on the provided topic, up to a maximum number specified.
-
-        This method first creates personas using the underlying `create_writer_with_persona` instance
-        and then prepends a default 'Basic fact writer' persona to the list before returning it.
-        The number of personas returned is limited to `max_num_persona`, excluding the default persona.
-
-        Args:
-            topic (str): The topic for which personas are to be generated.
-            max_num_persona (int): The maximum number of personas to generate, excluding the
-                default 'Basic fact writer' persona.
-
-        Returns:
-            List[str]: A list of persona descriptions, including the default 'Basic fact writer' persona
-                and up to `max_num_persona` additional personas generated based on the topic.
+        Generates a list of personas based on the provided topic.
+        If max_num_persona is 1, it generates a single, focused perspective suitable for a short article.
+        Otherwise, it generates multiple perspectives by consulting related topics.
         """
-        personas = self.create_writer_with_persona(topic=topic)
-        default_persona = "Basic fact writer: Basic fact writer focusing on broadly covering the basic facts about the topic."
-        considered_personas = [default_persona] + personas.personas[:max_num_persona]
-        return considered_personas
+        if max_num_persona == 1:
+            # Generate a single, essential theme for a brief ~500-word article.
+            with dspy.settings.context(lm=self.engine):
+                prediction = self.gen_single_perspective(main_topic=topic)
+                # Extract the perspective text. Ensure it's a list with one string.
+                single_perspective_text = prediction.single_perspective
+                if isinstance(single_perspective_text, list): # Predict can return a list
+                    single_perspective_text = single_perspective_text[0]
+                # Ensure the format matches what the rest of the system expects (e.g., "Perspective: Description")
+                # The prompt asks for a "concise phrase", so we might need to format it.
+                # For now, let's assume the output phrase is directly usable or the downstream system handles it.
+                # If a specific format like "Generated Perspective: Actual phrase" is needed, construct it here.
+                # For simplicity, using the direct output.
+                return [single_perspective_text]
+        else:
+            # Existing logic for multiple perspectives
+            personas_prediction = self.create_writer_with_persona(topic=topic)
+            default_persona = "Basic fact writer: Basic fact writer focusing on broadly covering the basic facts about the topic."
+            # Ensure personas_prediction.personas is a list
+            additional_personas = personas_prediction.personas if isinstance(personas_prediction.personas, list) else [personas_prediction.personas]
+            # max_num_persona here is for *additional* personas beyond the default one.
+            # So, if max_num_persona was 2, we want default + 2 others.
+            # The slicing should be personas_prediction.personas[:max_num_persona] if we want a total of max_num_persona INCLUDING the default.
+            # However, the original logic was `personas.personas[:max_num_persona]` and then prepended default.
+            # This means if max_num_persona=3, it would be default + 3 others.
+            # Let's stick to the original interpretation for max_num_persona > 1: default + (up to) max_num_persona LLM-generated ones.
+            considered_personas = [default_persona] + additional_personas[:max_num_persona]
+            return considered_personas

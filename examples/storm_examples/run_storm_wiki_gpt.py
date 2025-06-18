@@ -154,7 +154,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser()
+    parser = ArgumentParser(description="Run STORM short-form article generation.")
     # global arguments
     parser.add_argument(
         "--output-dir",

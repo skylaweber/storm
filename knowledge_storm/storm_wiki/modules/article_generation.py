@@ -23,26 +23,32 @@ class StormArticleGenerationModule(ArticleGenerationModule):
         article_gen_lm=Union[dspy.dsp.LM, dspy.dsp.HFModel],
         retrieve_top_k: int = 5,
         max_thread_num: int = 10,
+        target_overall_word_count: int = 500, # Added
+        intro_conclusion_word_target: int = 75, # Added
     ):
         super().__init__()
         self.retrieve_top_k = retrieve_top_k
         self.article_gen_lm = article_gen_lm
         self.max_thread_num = max_thread_num
+        self.target_overall_word_count = target_overall_word_count # Added
+        self.intro_conclusion_word_target = intro_conclusion_word_target # Added
+        # Pass article_gen_lm to ConvToSection, and later add ShortenSection if implemented
         self.section_gen = ConvToSection(engine=self.article_gen_lm)
 
     def generate_section(
-        self, topic, section_name, information_table, section_outline, section_query
+        self, topic, section_name, information_table, section_outline, section_query, target_word_count: int # Added target_word_count
     ):
         collected_info: List[Information] = []
         if information_table is not None:
             collected_info = information_table.retrieve_information(
                 queries=section_query, search_top_k=self.retrieve_top_k
             )
-        output = self.section_gen(
+        output = self.section_gen( # This is ConvToSection instance
             topic=topic,
-            outline=section_outline,
+            outline=section_outline, # section_outline is not used by ConvToSection.forward currently
             section=section_name,
             collected_info=collected_info,
+            target_word_count=target_word_count, # Pass target_word_count
         )
         return {
             "section_name": section_name,
@@ -70,21 +76,57 @@ class StormArticleGenerationModule(ArticleGenerationModule):
         information_table.prepare_table_for_retrieval()
 
         if article_with_outline is None:
-            article_with_outline = StormArticle(topic_name=topic)
+            logging.warning(f"Article outline for topic '{topic}' is None. Creating a default StormArticle.")
+            article_with_outline = StormArticle(topic_name=topic) # Should be topic_name
 
         sections_to_write = article_with_outline.get_first_level_section_names()
 
+        # Calculate word counts for sections
+        num_total_sections = len(sections_to_write)
+        main_body_section_titles = []
+        has_intro = False
+        has_conclusion = False
+
+        for title in sections_to_write:
+            if title.lower() == "introduction":
+                has_intro = True
+            elif title.lower() == "conclusion":
+                has_conclusion = True
+            else:
+                main_body_section_titles.append(title)
+
+        num_main_body_sections = len(main_body_section_titles)
+
+        remaining_wc_for_main_body = float(self.target_overall_word_count)
+        if has_intro:
+            remaining_wc_for_main_body -= self.intro_conclusion_word_target
+        if has_conclusion:
+            remaining_wc_for_main_body -= self.intro_conclusion_word_target
+
+        wc_per_main_section = 0
+        if num_main_body_sections > 0:
+            wc_per_main_section = max(50, int(remaining_wc_for_main_body / num_main_body_sections))
+        elif remaining_wc_for_main_body > 0 and num_total_sections > 0 : # Only intro/conclusion
+             # if only intro/conclusion, distribute remaining between them if they exist
+            if has_intro and has_conclusion:
+                self.intro_conclusion_word_target = max(50, int(remaining_wc_for_main_body / (1 if has_intro else 0 + 1 if has_conclusion else 1))))
+            elif has_intro or has_conclusion: # only one of them
+                 self.intro_conclusion_word_target = max(50, int(remaining_wc_for_main_body))
+
+
         section_output_dict_collection = []
-        if len(sections_to_write) == 0:
+
+        if num_total_sections == 0:
             logging.error(
-                f"No outline for {topic}. Will directly search with the topic."
+                f"No outline sections for {topic}. Attempting to write a single section using the topic name."
             )
             section_output_dict = self.generate_section(
                 topic=topic,
                 section_name=topic,
                 information_table=information_table,
-                section_outline="",
+                section_outline=topic,
                 section_query=[topic],
+                target_word_count=self.target_overall_word_count
             )
             section_output_dict_collection = [section_output_dict]
         else:
@@ -139,38 +181,74 @@ class ConvToSection(dspy.Module):
     def __init__(self, engine: Union[dspy.dsp.LM, dspy.dsp.HFModel]):
         super().__init__()
         self.write_section = dspy.Predict(WriteSection)
+        self.shorten_section = dspy.Predict(ShortenSection) # Added for length adjustment
         self.engine = engine
 
     def forward(
-        self, topic: str, outline: str, section: str, collected_info: List[Information]
+        self, topic: str, outline: str, section: str, collected_info: List[Information], target_word_count: int
     ):
         info = ""
         for idx, storm_info in enumerate(collected_info):
-            info += f"[{idx + 1}]\n" + "\n".join(storm_info.snippets)
+            info += f"[{idx + 1}]\n" + "\n".join(storm_info.snippets) # Snippets are already lists of strings
             info += "\n\n"
 
-        info = ArticleTextProcessing.limit_word_count_preserve_newline(info, 1500)
+        info = ArticleTextProcessing.limit_word_count_preserve_newline(info, 1500) # Keep limiting input context
 
         with dspy.settings.context(lm=self.engine):
-            section = ArticleTextProcessing.clean_up_section(
-                self.write_section(topic=topic, info=info, section=section).output
-            )
+            generated_section_content = self.write_section(
+                topic=topic,
+                info=info,
+                section=section,
+                target_word_count=str(target_word_count) # Ensure it's a string for the prompt
+            ).output
 
-        return dspy.Prediction(section=section)
+            # Optional: Post-generation length adjustment
+            current_word_count = len(generated_section_content.split())
+            # Allow 30% overshoot before attempting to shorten.
+            # Only shorten if current_word_count is meaningfully larger than target.
+            if current_word_count > target_word_count * 1.3 and current_word_count > 30: # Avoid shortening very short texts
+                logging.info(f"Section '{section}' is too long ({current_word_count} words, target {target_word_count}). Attempting to shorten.")
+                generated_section_content = self.shorten_section(
+                    section_title=section,
+                    target_word_count=str(target_word_count),
+                    current_word_count=str(current_word_count),
+                    original_text=generated_section_content
+                ).shortened_text
+
+        # The new WriteSection prompt asks for content only, no title.
+        # So, ArticleTextProcessing.clean_up_section (which removes title) should no longer be needed.
+        return dspy.Prediction(section=generated_section_content)
+
+
+class ShortenSection(dspy.Signature):
+    """The following text for the section "{section_title}" is too long. Its target was approximately {target_word_count} words, but it is {current_word_count} words. Please provide a more concise version of this text, strictly adhering to approximately {target_word_count} words. Focus only on the absolute most essential points and retain all citations in their original format (e.g., `[1]`)."""
+    section_title = dspy.InputField(prefix="Section title: ")
+    target_word_count = dspy.InputField(prefix="Target word count: ")
+    current_word_count = dspy.InputField(prefix="Current word count: ")
+    original_text = dspy.InputField(prefix="Original text to shorten:\n")
+    shortened_text = dspy.OutputField(prefix="Concise version:\n")
 
 
 class WriteSection(dspy.Signature):
-    """Write a Wikipedia section based on the collected information.
+    """You are writing a section titled "{section}" for a brief summary article on the topic "{topic}".
+    Your target word count for this specific section is approximately {target_word_count} words.
+    Base your writing *only* on the most critical and relevant information from the following knowledge snippets.
+    Ensure a neutral, informative, and engaging style suitable for a general audience.
+    The content must directly address the section title and flow logically.
+    **Crucially, you must cite the source for every piece of factual information using the format `[SNIPPET_ID]`** (e.g., `[1]`, `[2]`).
+    Do not include a 'References' or 'Sources' list. Do not use '#' or other hierarchical markers for the section title in your output; write only the paragraph content for this section.
 
-    Here is the format of your writing:
-        1. Use "#" Title" to indicate section title, "##" Title" to indicate subsection title, "###" Title" to indicate subsubsection title, and so on.
-        2. Use [1], [2], ..., [n] in line (for example, "The capital of the United States is Washington, D.C.[1][3]."). You DO NOT need to include a References or Sources section to list the sources at the end.
+    Provided knowledge snippets:
+    {info}
+
+    Write the content for the section "{section}" (approximately {target_word_count} words):
     """
 
-    info = dspy.InputField(prefix="The collected information:\n", format=str)
+    info = dspy.InputField(prefix="Provided knowledge snippets:\n", format=str)
     topic = dspy.InputField(prefix="The topic of the page: ", format=str)
-    section = dspy.InputField(prefix="The section you need to write: ", format=str)
+    section = dspy.InputField(prefix="The section title to write: ", format=str)
+    target_word_count = dspy.InputField(prefix="Target word count for this section: ", format=str)
     output = dspy.OutputField(
-        prefix="Write the section with proper inline citations (Start your writing with # section title. Don't include the page title or try to write other sections):\n",
+        prefix="Write the paragraph content for the section (no title, no hierarchical markers):\n",
         format=str,
     )

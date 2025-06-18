@@ -132,13 +132,13 @@ class STORMWikiRunnerArguments:
         metadata={"help": "Output directory for the results."},
     )
     max_conv_turn: int = field(
-        default=3,
+        default=3,  # Kept at 3 as per "e.g., 3-4"
         metadata={
             "help": "Maximum number of questions in conversational question asking."
         },
     )
     max_perspective: int = field(
-        default=3,
+        default=1,  # Changed from 3 to 1 for short articles
         metadata={
             "help": "Maximum number of perspectives to consider in perspective-guided question asking."
         },
@@ -165,6 +165,14 @@ class STORMWikiRunnerArguments:
             "help": "Maximum number of threads to use. "
             "Consider reducing it if keep getting 'Exceed rate limit' error when calling LM API."
         },
+    )
+    target_overall_word_count: int = field(
+        default=500,
+        metadata={"help": "Target overall word count for the generated short-form article."},
+    )
+    intro_conclusion_word_target: int = field(
+        default=75,
+        metadata={"help": "Target word count for introduction and conclusion sections."},
     )
 
 
@@ -199,6 +207,8 @@ class STORMWikiRunner(Engine):
             article_gen_lm=self.lm_configs.article_gen_lm,
             retrieve_top_k=self.args.retrieve_top_k,
             max_thread_num=self.args.max_thread_num,
+            target_overall_word_count=self.args.target_overall_word_count, # Added
+            intro_conclusion_word_target=self.args.intro_conclusion_word_target, # Added
         )
         self.storm_article_polishing_module = StormArticlePolishingModule(
             article_gen_lm=self.lm_configs.article_gen_lm,

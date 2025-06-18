@@ -61,12 +61,32 @@ class StormOutlineGenerationModule(OutlineGenerationModule):
             dlg_history=concatenated_dialogue_turns,
             callback_handler=callback_handler,
         )
-        article_with_outline_only = StormArticle.from_outline_str(
-            topic=topic, outline_str=result.outline
-        )
-        article_with_draft_outline_only = StormArticle.from_outline_str(
-            topic=topic, outline_str=result.old_outline
-        )
+
+        # result.outline is now expected to be a flat list of section titles, each on a new line.
+        section_titles = [title.strip() for title in result.outline.split('\n') if title.strip()]
+
+        article_with_outline_only = StormArticle(topic_name=topic)
+        if not section_titles: # Handle empty outline from LLM, though prompt requests sections.
+            # Add a default structure if LLM fails to produce one, or log warning.
+            # For now, it will be an empty article if section_titles is empty.
+            # Consider logging a warning here if section_titles is empty.
+            logging.warning(f"Outline generation for topic '{topic}' resulted in an empty list of section titles.")
+        for title in section_titles:
+            # Add sections directly under the root for a flat structure. Content is empty for now.
+            # Corrected class name to ArticleSectionNode from dspy.FixedArticleSectionNode
+            new_node = ArticleSectionNode(section_name=title, content="")
+            article_with_outline_only.root.add_child(new_node)
+
+        # The result.old_outline contains the original parametrically generated hierarchical outline.
+        # This can be used for the "draft_outline" if needed.
+        if result.old_outline and result.old_outline.strip():
+            article_with_draft_outline_only = StormArticle.from_outline_str(
+                topic=topic, outline_str=result.old_outline
+            )
+        else:
+            # If parametric_outline_str was empty for some reason.
+            article_with_draft_outline_only = StormArticle(topic_name=topic) # empty article
+
         if not return_draft_outline:
             return article_with_outline_only
         return article_with_outline_only, article_with_draft_outline_only
@@ -103,26 +123,36 @@ class WriteOutline(dspy.Module):
             ]
         )
         conv = ArticleTextProcessing.remove_citations(conv)
-        conv = ArticleTextProcessing.limit_word_count_preserve_newline(conv, 5000)
+        # Reduced word count for curated knowledge to align with short article focus
+        conv = ArticleTextProcessing.limit_word_count_preserve_newline(conv, 1500)
 
         with dspy.settings.context(lm=self.engine):
-            if old_outline is None:
-                old_outline = ArticleTextProcessing.clean_up_outline(
-                    self.draft_page_outline(topic=topic).outline
-                )
-                if callback_handler:
-                    callback_handler.on_direct_outline_generation_end(
-                        outline=old_outline
-                    )
-            outline = ArticleTextProcessing.clean_up_outline(
-                self.write_page_outline(
-                    topic=topic, old_outline=old_outline, conv=conv
-                ).outline
+            # Generate the parametric outline first (as old_outline was used by the original signature).
+            # This might be used as a fallback or ignored by the new prompt in WritePageOutlineFromConv.
+            parametric_outline_str = ArticleTextProcessing.clean_up_outline(
+                self.draft_page_outline(topic=topic).outline
             )
+            if callback_handler:
+                callback_handler.on_direct_outline_generation_end(
+                    outline=parametric_outline_str
+                )
+
+            # The modified WritePageOutlineFromConv now generates the flat list based on `conv`.
+            # The old_outline field in its signature is an InputField. We pass parametric_outline_str here.
+            # The prompt for WritePageOutlineFromConv instructs the LLM to base its output *only* on conv.
+            generated_flat_outline_str = self.write_page_outline(
+                topic=topic, old_outline=parametric_outline_str, conv=conv
+            ).outline
+
+            # Assuming the LLM follows the new prompt and outputs a clean flat list (each title on a new line).
+            # No ArticleTextProcessing.clean_up_outline should be needed for generated_flat_outline_str.
+            outline = generated_flat_outline_str
+
             if callback_handler:
                 callback_handler.on_outline_refinement_end(outline=outline)
 
-        return dspy.Prediction(outline=outline, old_outline=old_outline)
+        # The `old_outline` in the prediction can be the parametric one.
+        return dspy.Prediction(outline=outline, old_outline=parametric_outline_str)
 
 
 class WritePageOutline(dspy.Signature):
@@ -151,17 +181,29 @@ class NaiveOutlineGen(dspy.Module):
 
 
 class WritePageOutlineFromConv(dspy.Signature):
-    """Improve an outline for a Wikipedia page. You already have a draft outline that covers the general information. Now you want to improve it based on the information learned from an information-seeking conversation to make it more informative.
-    Here is the format of your writing:
-    1. Use "#" Title" to indicate section title, "##" Title" to indicate subsection title, "###" Title" to indicate subsubsection title, and so on.
-    2. Do not include other information.
-    3. Do not include topic name itself in the outline.
+    """You are tasked with creating a simple and logical outline for a short article of about 500 words on the main topic: {topic}.
+    Base the outline *only* on the key themes present in the following curated knowledge:
+    {conv}
+
+    The outline must follow this structure:
+    1. A brief 'Introduction' section.
+    2. One or two (at most) main body sections. Each section should cover a distinct key theme found in the curated knowledge. Provide a concise, descriptive title for each main body section.
+    3. A brief 'Conclusion' section.
+
+    Output the outline as a flat list of section titles in logical order, with each title on a new line. Do not use '#', '##', or any other hierarchical markers.
+    Example output format:
+    Introduction
+    [Main Theme 1 Title]
+    [Main Theme 2 Title (if applicable)]
+    Conclusion
     """
 
-    topic = dspy.InputField(prefix="The topic you want to write: ", format=str)
-    conv = dspy.InputField(prefix="Conversation history:\n", format=str)
-    old_outline = dspy.OutputField(prefix="Current outline:\n", format=str)
+    topic = dspy.InputField(prefix="The main topic: ", format=str)
+    conv = dspy.InputField(prefix="Curated knowledge (conversation history):\n", format=str)
+    # old_outline is no longer strictly needed by the prompt, but kept for signature compatibility if required by dspy.Predict call structure.
+    # The prompt instructs the LLM to base the outline *only* on the conversation.
+    old_outline = dspy.InputField(prefix="Previous outline (to be ignored by LLM):\n", format=str) # Changed from OutputField to InputField
     outline = dspy.OutputField(
-        prefix='Write the Wikipedia page outline (Use "#" Title" to indicate section title, "##" Title" to indicate subsection title, ...):\n',
+        prefix="Write the flat list of section titles for the short article:\n",
         format=str,
     )

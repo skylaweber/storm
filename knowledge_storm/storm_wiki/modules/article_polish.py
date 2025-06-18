@@ -30,27 +30,55 @@ class StormArticlePolishingModule(ArticlePolishingModule):
         self, topic: str, draft_article: StormArticle, remove_duplicate: bool = False
     ) -> StormArticle:
         """
-        Polish article.
+        Polish article. For short-form articles, this primarily involves a redundancy check
+        and ensuring references are correctly processed. Lead section (Introduction) generation
+        is now handled in the Article Generation stage.
 
         Args:
             topic (str): The topic of the article.
-            draft_article (StormArticle): The draft article.
-            remove_duplicate (bool): Whether to use one additional LM call to remove duplicates from the article.
+            draft_article (StormArticle): The draft article from the generation stage.
+            remove_duplicate (bool): Whether to use an LM call to remove duplicates.
         """
 
-        article_text = draft_article.to_string()
-        polish_result = self.polish_page(
+        article_text = draft_article.to_string() # This will be the full article string
+
+        # PolishPageModule's forward will now primarily use polish_page if remove_duplicate is True.
+        # The lead_section generation within PolishPageModule will be skipped.
+        polish_result = self.polish_page( # polish_page is an instance of PolishPageModule
             topic=topic, draft_page=article_text, polish_whole_page=remove_duplicate
         )
-        lead_section = f"# summary\n{polish_result.lead_section}"
-        polished_article = "\n\n".join([lead_section, polish_result.page])
+
+        # polish_result.page will be the potentially de-duplicated full article text.
+        # polish_result.lead_section will be None or empty as we'll modify PolishPageModule.
+        polished_article_text = polish_result.page
+
+        # Reparse the potentially modified text.
+        # This assumes PolishPage LLM call correctly maintains the flat structure provided by draft_article.to_string()
         polished_article_dict = ArticleTextProcessing.parse_article_into_dict(
-            polished_article
+            polished_article_text
         )
-        polished_article = copy.deepcopy(draft_article)
-        polished_article.insert_or_create_section(article_dict=polished_article_dict)
-        polished_article.post_processing()
-        return polished_article
+
+        # Create a new StormArticle object to hold the polished version,
+        # or update a deepcopy of the draft_article.
+        # Using deepcopy ensures that if parsing fails or structure is mangled by LLM,
+        # we don't corrupt the original draft_article object before this point.
+        polished_article_obj = copy.deepcopy(draft_article)
+
+        # Clear existing content before inserting, to reflect the polished text accurately.
+        # A simpler way might be to create a new StormArticle and populate it, if insert_or_create_section
+        # doesn't handle removal of sections that might have been deleted by polish_page LLM.
+        # However, parse_article_into_dict and insert_or_create_section should rebuild based on parsed dict.
+        # For a flat structure, this should be relatively safe.
+        # Let's clear the children of root to ensure clean insertion.
+        polished_article_obj.root.children = []
+        polished_article_obj.insert_or_create_section(article_dict=polished_article_dict)
+
+        # Crucially, transfer the references from the original draft_article,
+        # as the LLM polishing calls might not preserve reference metadata, only placeholders.
+        polished_article_obj.reference = draft_article.reference
+
+        polished_article_obj.post_processing() # This handles citation reordering etc.
+        return polished_article_obj
 
 
 class WriteLeadSection(dspy.Signature):
@@ -66,10 +94,10 @@ class WriteLeadSection(dspy.Signature):
 
 
 class PolishPage(dspy.Signature):
-    """You are a faithful text editor that is good at finding repeated information in the article and deleting them to make sure there is no repetition in the article. You won't delete any non-repeated part in the article. You will keep the inline citations and article structure (indicated by "#", "##", etc.) appropriately. Do your job for the following article."""
+    """You are a faithful text editor that is good at finding repeated information in the article and deleting them to make sure there is no repetition in the article. You won't delete any non-repeated part in the article. You will keep the inline citations and article structure (indicated by "#", "##", etc.) appropriately. Do your job for the following ~500-word article."""
 
-    draft_page = dspy.InputField(prefix="The draft article:\n", format=str)
-    page = dspy.OutputField(prefix="Your revised article:\n", format=str)
+    draft_page = dspy.InputField(prefix="The draft ~500-word article:\n", format=str)
+    page = dspy.OutputField(prefix="Your revised article (keeping original structure and citations):\n", format=str)
 
 
 class PolishPageModule(dspy.Module):
@@ -85,18 +113,15 @@ class PolishPageModule(dspy.Module):
         self.polish_page = dspy.Predict(PolishPage)
 
     def forward(self, topic: str, draft_page: str, polish_whole_page: bool = True):
-        # NOTE: Change show_guidelines to false to make the generation more robust to different LM families.
-        with dspy.settings.context(lm=self.write_lead_engine, show_guidelines=False):
-            lead_section = self.write_lead(
-                topic=topic, draft_page=draft_page
-            ).lead_section
-            if "The lead section:" in lead_section:
-                lead_section = lead_section.split("The lead section:")[1].strip()
+        # Lead section generation is removed as it's handled by ArticleGeneration stage.
+        lead_section_output = None # Or an empty string
+
         if polish_whole_page:
             # NOTE: Change show_guidelines to false to make the generation more robust to different LM families.
             with dspy.settings.context(lm=self.polish_engine, show_guidelines=False):
-                page = self.polish_page(draft_page=draft_page).page
+                # The PolishPage signature expects draft_page (the full article text)
+                page_output = self.polish_page(draft_page=draft_page).page
         else:
-            page = draft_page
+            page_output = draft_page
 
-        return dspy.Prediction(lead_section=lead_section, page=page)
+        return dspy.Prediction(lead_section=lead_section_output, page=page_output)

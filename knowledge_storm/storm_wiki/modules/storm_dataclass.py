@@ -368,8 +368,25 @@ class StormArticle(Article):
         # Adjust the initial level based on whether root is included and hashtags are added
         for child in self.root.children:
             preorder_traverse(child, level=1)
-        result = [i.strip() for i in result if i is not None and i.strip()]
-        return "\n\n".join(result)
+
+        content_parts = [i.strip() for i in result if i is not None and i.strip()]
+        article_string = "\n\n".join(content_parts)
+
+        # Append References section
+        if self.reference and self.reference.get("url_to_unified_index") and self.reference.get("url_to_info"):
+            # Sort references by their unified index
+            sorted_refs = sorted(self.reference["url_to_unified_index"].items(), key=lambda item: item[1])
+
+            ref_strings = ["\n\n## References"]
+            for url, unified_idx in sorted_refs:
+                info = self.reference["url_to_info"].get(url)
+                title_str = f" - \"{info.title}\"" if info and info.title else ""
+                # Ensure URL is displayed correctly even if title is missing
+                url_display = url if url else "URL not available"
+                ref_strings.append(f"[{unified_idx}] {url_display}{title_str}")
+            article_string += "\n" + "\n".join(ref_strings)
+
+        return article_string
 
     def reorder_reference_index(self):
         # pre-order traversal to get order of references appear in the article

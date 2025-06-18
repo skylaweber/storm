@@ -137,17 +137,23 @@ class AskQuestion(dspy.Signature):
 
 
 class AskQuestionWithPersona(dspy.Signature):
-    """You are an experienced Wikipedia writer and want to edit a specific page. Besides your identity as a Wikipedia writer, you have specific focus when researching the topic.
-    Now, you are chatting with an expert to get information. Ask good questions to get more useful information.
-    When you have no more question to ask, say "Thank you so much for your help!" to end the conversation.
-    Please only ask a question at a time and don't ask what you have asked before. Your questions should be related to the topic you want to write.
+    """You are an experienced Wikipedia writer. Your current assignment is to gather information for a brief ~500-word summary article.
+Your specific research focus (persona) is: {persona} for the main topic: {topic}.
+Conversation history (if any):
+{conv}
+
+Based on your research focus and the conversation history (if any):
+- If this is the start of the conversation (no history), generate 1 or 2 core research questions to uncover the most critical facts for your focused summary.
+- If there is history, generate **at most one essential follow-up question** *only if* the previous answer clearly leaves a critical ambiguity or misses a directly related core point for your research focus.
+- If no more questions are needed to cover the essentials for your focused summary, or if the conversation has covered 2-3 turns, respond with "Thank you so much for your help!" to end the conversation.
+Please only ask one question at a time and ensure it's directly related to your research focus.
     """
 
-    topic = dspy.InputField(prefix="Topic you want to write: ", format=str)
+    topic = dspy.InputField(prefix="Main topic: ", format=str)
     persona = dspy.InputField(
-        prefix="Your persona besides being a Wikipedia writer: ", format=str
+        prefix="Your specific research focus (persona): ", format=str
     )
-    conv = dspy.InputField(prefix="Conversation history:\n", format=str)
+    conv = dspy.InputField(prefix="Conversation history (if any):\n", format=str)
     question = dspy.OutputField(format=str)
 
 
@@ -166,7 +172,7 @@ class QuestionToQuery(dspy.Signature):
 
 class AnswerQuestion(dspy.Signature):
     """You are an expert who can use information effectively. You are chatting with a Wikipedia writer who wants to write a Wikipedia page on topic you know. You have gathered the related information and will now use the information to form a response.
-    Make your response as informative as possible, ensuring that every sentence is supported by the gathered information. If the [gathered information] is not directly related to the [topic] or [question], provide the most relevant answer based on the available information. If no appropriate answer can be formulated, respond with, “I cannot answer this question based on the available information,” and explain any limitations or gaps.
+    Make your response as informative as possible, ensuring that every sentence is supported by the gathered information. **The answer should be concise and directly address the question, providing only the key information found in the snippets. Avoid elaborating beyond what is necessary for a brief article.** If the [gathered information] is not directly related to the [topic] or [question], provide the most relevant answer based on the available information. If no appropriate answer can be formulated, respond with, “I cannot answer this question based on the available information,” and explain any limitations or gaps.
     """
 
     topic = dspy.InputField(prefix="Topic you are discussing about:", format=str)
